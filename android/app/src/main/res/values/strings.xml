@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">WarrantyVault</string>
+    <string name="title_activity_main">WarrantyVault</string>
+    <string name="package_name">com.brent.warrantyvault</string>
+    <string name="custom_url_scheme">com.brent.warrantyvault</string>
+</resources>

@@ -1,12 +1,12 @@
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
-import * as fs from "fs";
-import * as path from "path";
+import { Camera, CameraResultType, CameraSource } from "@capacitor/camera";
 
 // ── Clients ────────────────────────────────────────────────────────────────
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.NEXT_PUBLIC_OPENAI_API_KEY,
+  dangerouslyAllowBrowser: true, // required for client-side usage in Capacitor
 });
 
 const supabase = createClient(
@@ -29,24 +29,42 @@ export interface ScanResult {
   error?: string;
 }
 
-// ── Step 1: Analyze screenshot with GPT-4o ─────────────────────────────────
+// ── Step 1: Capture photo via Capacitor Camera API ─────────────────────────
 
-export async function extractWarrantyFromScreenshot(
-  imageInput: string | Buffer
-): Promise<ExtractedWarranty> {
-  // Accept a file path (string) or raw image buffer
-  let base64Image: string;
-  let mimeType = "image/png";
+/**
+ * Opens the device camera or photo library and returns the image as a
+ * base64-encoded string (without the data-URI prefix).
+ *
+ * @param source  CameraSource.Camera  — live camera shutter
+ *                CameraSource.Photos  — pick from gallery (default)
+ */
+export async function captureWarrantyImage(
+  source: CameraSource = CameraSource.Photos
+): Promise<{ base64: string; mimeType: "image/jpeg" | "image/png" }> {
+  const photo = await Camera.getPhoto({
+    resultType: CameraResultType.Base64,
+    source,
+    quality: 90,
+    // Ask for JPEG to keep payload size reasonable for GPT-4o
+    saveToGallery: false,
+  });
 
-  if (typeof imageInput === "string") {
-    const ext = path.extname(imageInput).toLowerCase();
-    mimeType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
-    const buffer = fs.readFileSync(imageInput);
-    base64Image = buffer.toString("base64");
-  } else {
-    base64Image = imageInput.toString("base64");
+  if (!photo.base64String) {
+    throw new Error("Camera returned no image data.");
   }
 
+  const mimeType =
+    photo.format === "png" ? "image/png" : "image/jpeg";
+
+  return { base64: photo.base64String, mimeType };
+}
+
+// ── Step 2: Analyze image with GPT-4o ─────────────────────────────────────
+
+export async function extractWarrantyFromBase64(
+  base64Image: string,
+  mimeType: "image/jpeg" | "image/png" = "image/jpeg"
+): Promise<ExtractedWarranty> {
   const response = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
@@ -94,7 +112,7 @@ Do not include any explanation — return only the JSON object.`,
   return parsed;
 }
 
-// ── Step 2: Save extracted data to Supabase ────────────────────────────────
+// ── Step 3: Save extracted data to Supabase ────────────────────────────────
 
 export async function saveWarrantyToSupabase(
   userId: string,
@@ -115,23 +133,27 @@ export async function saveWarrantyToSupabase(
   }
 }
 
-// ── Step 3: Combined scanner pipeline ─────────────────────────────────────
+// ── Step 4: Combined scanner pipeline ─────────────────────────────────────
 
 /**
- * Full pipeline: analyze an Amazon order screenshot → extract fields → save to Supabase.
+ * Full pipeline: open the Capacitor camera/gallery → extract fields via
+ * GPT-4o → save to Supabase.
  *
- * @param imageInput  File path (string) or raw image Buffer of the screenshot.
- * @param userId      Authenticated Supabase user ID to associate the record with.
- * @param imageUrl    Optional public URL of the stored screenshot image.
+ * @param userId   Authenticated Supabase user ID to associate the record with.
+ * @param source   CameraSource.Camera | CameraSource.Photos (default: Photos)
+ * @param imageUrl Optional public URL of the stored screenshot image.
  */
 export async function scanAndSaveWarranty(
-  imageInput: string | Buffer,
   userId: string,
+  source: CameraSource = CameraSource.Photos,
   imageUrl?: string
 ): Promise<ScanResult> {
   try {
+    console.log("📷 Opening camera / photo picker...");
+    const { base64, mimeType } = await captureWarrantyImage(source);
+
     console.log("🔍 Analyzing screenshot with GPT-4o...");
-    const extracted = await extractWarrantyFromScreenshot(imageInput);
+    const extracted = await extractWarrantyFromBase64(base64, mimeType);
     console.log("✅ Extracted:", extracted);
 
     console.log("💾 Saving to Supabase...");
@@ -144,20 +166,4 @@ export async function scanAndSaveWarranty(
     console.error("❌ Scanner error:", message);
     return { success: false, error: message };
   }
-}
-
-// ── CLI usage (optional) ───────────────────────────────────────────────────
-// ts-node scanner.ts <image-path> <user-id>
-
-if (require.main === module) {
-  const [, , imagePath, userId] = process.argv;
-
-  if (!imagePath || !userId) {
-    console.error("Usage: ts-node scanner.ts <image-path> <user-id>");
-    process.exit(1);
-  }
-
-  scanAndSaveWarranty(imagePath, userId).then((result) => {
-    if (!result.success) process.exit(1);
-  });
 }
